@@ -466,6 +466,171 @@ class Diffusion_ViT(models.Model):
 		print("\n".join(inf)[:-1])
 		print("="*65)
 
+
+class ViT_AE(models.Model):
+	"""Implementation of VisionTransformer Based on Keras
+	Args:
+		- image_size: Input Image Size, integer or tuple
+		- patch_size: Size of each patch, integer or tuple
+		- num_classes: Number of output classes
+		- hidden_dim: The embedding dimension of each patch, it should be set to an integer multiple of the `atten_heads`
+		- mlp_dim: The projection dimension of the mlp_block, it is generally 4 times that of `hidden_dim`
+		- atten_heads: Number of self attention heads
+		- encoder_depth: Number of the transformer encoder layer
+		- dropout_rate: Dropout probability
+		- activatiion: Activation function of mlp_head
+		- pre_logits: Insert pre_Logits layer or not 
+		- include_mlp_head: Insert mlp_head layer or not
+	"""
+	def __init__(
+		self, 
+		image_size = 224,
+		patch_size = 16,
+		hidden_dim = 768,
+		mlp_dim = 3072,
+		atten_heads = 12,
+		encoder_depth = 5,
+		dropout_rate = 0.,
+		activation = "linear",
+		pre_logits = False,
+		decoder = 'cnn',
+		**kwargs
+		):
+		assert isinstance(image_size, int) or isinstance(image_size, tuple), "`image_size` should be int or tuple !"
+		assert isinstance(patch_size, int) or isinstance(patch_size, tuple), "`patch_size` should be int or tuple !"
+		assert hidden_dim%atten_heads==0, "hidden_dim and atten_heads do not match !"
+
+		if isinstance(image_size, int):
+			image_size = (image_size, image_size)
+		if isinstance(patch_size, int):
+			patch_size = (patch_size, patch_size)
+
+		if not kwargs.get("name"):
+			config = {
+				"hidden_dim": hidden_dim,
+				"mlp_dim": mlp_dim,
+				"atten_heads": atten_heads,
+				"encoder_depth": encoder_depth,
+				}
+			size = "CUSTOM_SIZE"
+			if config == VIT_B_CONFIG: size = "B"
+			if config == VIT_L_CONFIG: size = "L" 
+			patch = f"{patch_size[0]}" if patch_size[0]==patch_size[1] else f"{patch_size[0]}_{patch_size[1]}"
+			image = f"{image_size[0]}" if image_size[0]==image_size[1] else f"{image_size[0]}_{image_size[1]}"
+			kwargs["name"] = f"ViT-{size}-{patch}-{image}"
+
+		super().__init__(**kwargs)
+		self.image_size = image_size[:2]
+		self.patch_size = patch_size[:2]
+		self.hidden_dim = hidden_dim
+		self.mlp_dim = mlp_dim
+
+		self.atten_heads = atten_heads
+		self.encoder_depth = encoder_depth
+		self.dropout_rate = dropout_rate
+		self.activation = activations.get(activation)
+		self.pre_logits = pre_logits
+		self.decoder = decoder
+		self.load_weights_inf = None
+		self.build((None, *self.image_size, 3))
+
+	def create_conv_decoder(self, target_image_shape):
+		"""Creates a sequential model to act as a convolutional decoder."""
+		model = models.Sequential(name="conv_decoder")
+
+		# input (None, 1, 768)
+		model.add(layers.Dense(784,activation='relu')) 
+		model.add(layers.Reshape((28, 28, 1)))  # Reshape to a 4D tensor to start the convolutional process
+		model.add(layers.Conv2D(256, kernel_size=3, padding='same', activation='relu')) # 28 28 256
+		model.add(layers.BatchNormalization())
+		
+		# Upsample and convolve. Adjust the numbers and layers as per your requirements.
+		model.add(layers.UpSampling2D(size=(2, 2)))
+		model.add(layers.Conv2D(128, kernel_size=3, padding='same', activation='relu')) # 56 56 128
+		model.add(layers.BatchNormalization())
+
+		model.add(layers.UpSampling2D(size=(2, 2)))
+		model.add(layers.Conv2D(64, kernel_size=3, padding='same', activation='relu')) # 112 112 64
+		model.add(layers.BatchNormalization())
+
+		model.add(layers.UpSampling2D(size=(2, 2)))
+		model.add(layers.Conv2D(3, kernel_size=3, padding='same',  activation='sigmoid')) # 224 224 3
+
+		return model
+	
+	def create_linear_decoder(self, image_shape, patch_size):
+		
+		inputs = layers.Input((1, 768))
+		x = layers.Dense(256*3, activation='relu')(inputs)
+		x = layers.Reshape((224,224,3))(x)
+		outputs = layers.Conv2D(filters=3, kernel_size=3, padding='same', activation='sigmoid')(x)
+
+	
+		return Model(inputs=[inputs], outputs=[outputs], name='linear_decoder')
+
+	def build(self, input_shape):
+		self.patch_embedding=PatchEmbedding(self.patch_size, self.hidden_dim, name="patch_embedding")
+		self.add_cls_token = AddCLSToken(self.hidden_dim, name="add_cls_token")
+		self.position_embedding = AddPositionEmbedding(name="position_embedding")
+		self.encoder_blocks = [
+			TransformerEncoder(
+				self.mlp_dim, 
+				self.atten_heads, 
+				self.dropout_rate,
+				name=f"transformer_block_{i}"
+				) for i in range(self.encoder_depth)]
+		self.layer_norm = layers.LayerNormalization(epsilon=1e-6, name="layer_norm")
+		self.extract_token = layers.Lambda(lambda x: x[:,0], name="extract_token")
+		if self.pre_logits: self.pre_logits = layers.Dense(self.hidden_dim, activation="tanh", name="pre_logits")
+		if self.decoder == "cnn": 
+			self.decoder = self.create_conv_decoder(input_shape[0])
+		elif self.decoder == 'transformer':
+			self.decoder = self.create_transformer_decoder(input_shape[0], self.patch_size)
+		elif self.decoder == 'linear':
+			self.decoder = self.create_linear_decoder(input_shape[0], self.patch_size)	
+		super().build(input_shape)
+		self.call(layers.Input(shape=self.image_size + (3,)))
+
+
+	def call(self, inputs):
+		x = self.patch_embedding(inputs)
+		x = self.add_cls_token(x)
+		x = self.position_embedding(x)
+
+		for encoder in self.encoder_blocks:
+			x = encoder(x)
+		x = self.layer_norm(x)
+		x = self.extract_token(x)
+
+		if self.pre_logits:
+			x = self.pre_logits(x)
+		x = self.decoder(x)
+		return x
+
+	def load_weights(self, *kwargs):
+		super().load_weights(*kwargs)
+		self.load_weights_inf = {l.name:"loaded - h5 weights" for l in self.layers}
+
+	def loading_summary(self):
+		""" Print model information about loading imagenet pre training weights.
+		` - imagenet` means successful reading of imagenet pre training weights file
+		` - not pre trained` means that the model did not load the imagenet pre training weights file
+		` - mismatch` means that the pre training weights of the imagenet do not match the parameter shapes of the model layer
+		` - not found` means that there is no weights for the layer in the imagenet pre training weights file
+		` - h5 weights` means that the model is loaded with h5 weights
+		"""
+		if self.load_weights_inf:
+			inf = [(key+' '*(35-len(key))+value+"\n") for (key,value) in self.load_weights_inf.items()]
+		else:
+			inf = [(l.name+' '*(35-len(l.name))+"not loaded - not pre trained"+"\n") for l in self.layers]
+		print(f'Model: "{self.name}"')
+		print("-"*65)
+		print("layers" + " "*29 + "load weights inf")
+		print("="*65)
+		print("\n".join(inf)[:-1])
+		print("="*65)
+
+
 def ViT_B16(
 	image_size=None,
 	num_classes=None,
@@ -562,6 +727,49 @@ def ViT_B16_Diffusion(
 
 
 	return vit
+
+
+def ViT_S8_AE(
+	image_size=224,
+	activation="linear",
+	dropout_rate=0.1,
+	pre_logits=None,
+	**kwargs
+	):
+	"""Implementation of ViT_B16 Based on Keras.
+	Args:
+		- image_size: Input Image Size
+		- num_classes: Number of output classes
+		- activation: Activation function of mlp_head
+		- dropout_rate: Dropout probability
+		- pre_logits: Insert pre_Logits layer or not 
+		- include_mlp_head: Insert mlp_head layer or not
+		- pre_trained: using pre trained model weights or not
+		the .npz weight file will be downloaded to "C:\\Users\\username\\.keras\\weights" when it is True
+		- weights: This argument will determine the selection which dataset does the pre trained model come from
+		this argument will set the values of argument `image_size`, `num_classes`, and `pre_logits` if they are None
+		this argument should be set to one of "imagenet21k" and "imagenet21k+imagenet2012"
+		"imagenet21k" >>> `image_size`=224, `num_classes`=21843, `pre_logits`=True
+		"imagenet21k+imagenet2012" >>> `image_size`=384, `num_classes`=1000, `pre_logits`=False
+
+	return:
+		- ViT_B16: ViT with a patch_size of 16, hiddem_dim of 768, 
+		mlp_dim of 3072, atten_heads of 12, and encoder layers of 12
+	"""
+ 
+	vit = ViT_AE(
+		**VIT_B_CONFIG_DIFFUSION,
+		patch_size=8,
+		image_size=image_size,
+		activation=activation,
+		dropout_rate=dropout_rate,
+		pre_logits=pre_logits,
+		**kwargs
+		)
+
+
+	return vit
+
 
 def ViT_B32(
 	image_size=None,
