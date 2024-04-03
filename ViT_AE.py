@@ -39,6 +39,11 @@ def train_step(x):
 	optimizer.apply_gradients(zip(grads, model.trainable_variables))
 	return loss
 
+def val_step(x):
+	y_pred = model(x, training=True)
+	loss = loss_func(x, y_pred)
+	return loss
+
 def predict(x):
 	return model(x, training=False)
 
@@ -54,7 +59,7 @@ EPOCHS = 100
 steps_per_epoch =  3125 #1562 #6250 #12500
 val_steps_per_epoch = 250
 optimizer = keras.optimizers.Nadam(learning_rate=LR)
-#loss_func = keras.losses.MeanAbsoluteError()
+#loss_func = keras.losses.MeanAbsoluteError() # switched a epoch 3
 loss_func = keras.losses.MeanSquaredError()
 checkpoints = '/home/marble/Desktop/Taylor/python/ml/checkpoints/ViT_AE/'
 os.makedirs(checkpoints,exist_ok=True)
@@ -82,7 +87,7 @@ val_data_gen = data_generator.flow_from_directory(
 
 most_recent = 0
 try:
-	most_recent = max([int(model.split('ViT_AE_v1_')[1].split('.keras')[0]) for model in os.listdir(checkpoints)])
+	most_recent = max([int(model.split('_')[3].split('.keras')[0]) for model in os.listdir(checkpoints)])
 	#most_recent = 1
 	model = vit.ViT_S8_AE()
 	model.load_weights(f'{checkpoints}ViT_AE_v1_{most_recent}.keras')
@@ -140,7 +145,7 @@ if train:
 
 			val_batch = tf.cast(val_batch, tf.float32)
 
-			loss = train_step(x_batch)
+			loss = val_step(x_batch)
 			val_losses.append(loss)
 			print(f'\rLoss: {last_train_loss:.4f}, {last_train_step}/{steps_per_epoch}, Val Loss: {np.mean(val_losses):.4f}, {step}/{val_steps_per_epoch}', end='', flush=True)
 
