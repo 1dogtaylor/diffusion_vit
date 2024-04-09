@@ -7,6 +7,7 @@ import cv2
 from keras.preprocessing.image import ImageDataGenerator
 import matplotlib.pyplot as plt
 from keras_vit import vit
+from vit_utils import ViT_S8_AE
 
 def load_images(path, num_images):
 	x = []
@@ -51,17 +52,17 @@ image_path = '/home/marble/Desktop/Taylor/python/ml/product_imgs/bluebackground/
 val_path = '/home/marble/Desktop/Taylor/python/ml/product_imgs/bluebackground/val/'
 
 show = False
-train = True
+train = False
 IMG_SIZE = (224,224)
 BATCH_SIZE = 8
 LR = 0.0008
-EPOCHS = 100
-steps_per_epoch =  3125 #1562 #6250 #12500
-val_steps_per_epoch = 250
+EPOCHS = 1000
+steps_per_epoch =  10000 #1562 #6250 #12500
+val_steps_per_epoch = 500
 optimizer = keras.optimizers.Nadam(learning_rate=LR)
 #loss_func = keras.losses.MeanAbsoluteError() # switched a epoch 3
 loss_func = keras.losses.MeanSquaredError()
-checkpoints = '/home/marble/Desktop/Taylor/python/ml/checkpoints/ViT_AE/'
+checkpoints = '/home/marble/Desktop/Taylor/python/ml/checkpoints/ViT_AE/v3/'
 os.makedirs(checkpoints,exist_ok=True)
 
 data_generator = ImageDataGenerator(rescale=1./255)
@@ -88,18 +89,21 @@ val_data_gen = data_generator.flow_from_directory(
 most_recent = 0
 try:
 	most_recent = max([int(model.split('_')[3].split('.keras')[0]) for model in os.listdir(checkpoints)])
-	#most_recent = 1
-	model = vit.ViT_S8_AE()
-	model.load_weights(f'{checkpoints}ViT_AE_v1_{most_recent}.keras')
+	model = ViT_S8_AE()
+	model.load_weights(f'{checkpoints}ViT_AE_v3_{most_recent}.keras')
 	model.summary()
-	print(f'Model found: ViT_AE_v1_{most_recent}.keras')
+	print(f'Model found: ViT_AE_v3_{most_recent}.keras')
 except Exception as e:
 	print(e)
-	model = vit.ViT_S8_AE()
+	#model = vit.ViT_S8_AE()
+	model = ViT_S8_AE()
 	model.summary()
+	for layer in model.layers:
+		if layer.name == 'conv_decoder':
+			layer.summary()
+			break
+
 	print('No model found, creating new model')
-
-
 
 model.compile(loss=loss_func, optimizer=optimizer)
 
@@ -154,14 +158,13 @@ if train:
 			
 		print()  # Ensure the epoch summary is printed on a new line
 
-		model.save_weights(f'{checkpoints}ViT_AE_v1_{most_recent+epoch+1}.keras')
+		model.save_weights(f'{checkpoints}ViT_AE_v2_{most_recent+epoch+1}.keras')
 else:
-	x = val_data_gen[0]  # Assuming 3 channels for RGB
+	x = val_data_gen[0]  
 	y = predict(x)
 
-	
 	# Plotting
-	fig, axs = plt.subplots(2, 4, figsize=(20, 10))  # Adjust figsize as needed
+	fig, axs = plt.subplots(2, 4, figsize=(20, 10))
 	
 	for i in range(4):
 		if i < len(x) and i < len(y):
@@ -170,8 +173,6 @@ else:
 			axs[0, i].axis('off')
 	
 			# Bottom row: Predictions from y
-			# Assuming y[i] is the prediction for x[i] and it can be directly visualized with imshow
-			# Adjust indexing based on your prediction structure
 			axs[1, i].imshow(y[i])
 			axs[1, i].axis('off')
 	
